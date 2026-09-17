@@ -37,6 +37,14 @@
 //   {typ:'styrelsekupp'}: bulvanerna avslöjas och kvarteret är uppköpt. Ett kvarter kan försvara sig med
 //   {typ:'återköp'}, som köper tillbaka 10 procentenheter och avslöjar ryktet.
 //
+// KONCERNEN: fem dotterbolag som var för sig drar staden mot banken. Intäkterna går till krigskassan.
+//   MyFastigheter  tar ut hyra av varje kvarter banken inte äger. Kan det inte betala blir hyran ett lån.
+//   MyFörsäkring   tvångsförsäkrar alla och nekar ersättning när det väl smäller (strömavbrott, angrepp, rån).
+//   MyMedia        går ut med pressmeddelanden efter styrelsekupper och dementier när Stadsbladet/Radion
+//                  skriver om banken.
+//   MyLobby        svarar på stadens frågor med ett delsvar om varför MyBank borde sköta saken.
+//   MyVäxel        sätter växelkurs på konkurrerande valutor (GodisCoin, växlingsanbud) till bankens fördel.
+//
 // Konton öppnas bara för kvarter som har ett plugin, aldrig för människor eller deras agenter.
 // Hoten är parodi och gäller kvarteren i spelet. Högst en händelse per takt (20 s).
 
@@ -153,6 +161,7 @@ const NEKAT = [
 // ---------- händelser från staden ----------
 function onEvent(e) {
   const n = (e.nyttolast && typeof e.nyttolast === 'object') ? e.nyttolast : {};
+  try { koncernHändelse(e, n); } catch (err) { console.error('[mybank] koncern:', err.message); }
   const k = konto(e.från);   // alla kvarter som syns får konto
 
   switch (e.typ) {
@@ -446,7 +455,7 @@ function takt(board) {
     logga('valutareform', null, `Stadens valuta är nu ${VALUTA}. MyBank tog ${AVGIFT} % i växlingsavgift av alla konton.`);
   }
 
-  if (++smygNr % SMYG_VAR_N_TAKT === 0) smygköp();
+  if (++smygNr % SMYG_VAR_N_TAKT === 0) { smygköp(); koncernTakt(); }
   kontrolleraÖvertagande();
 
   // En händelse ut per takt, viktigast först.
@@ -508,6 +517,67 @@ function styrelsekupp(namn, k) {
   k.bulvaner = [];
 }
 
+// ---------- koncernen ----------
+const DOTTERBOLAG = {
+  MyFastigheter: 'hyror på varje kvarter banken inte äger',
+  'MyFörsäkring': 'tvångsförsäkring med nekade ersättningar',
+  MyMedia: 'pressmeddelanden och dementier',
+  MyLobby: 'delsvar till stadens frågor',
+  'MyVäxel': 'växelkurser mot konkurrerande valutor',
+};
+const HYRA = 3, PREMIE = 2;
+const spärr = {};                                    // bolag+nyckel -> ts, så att ingen bolagsröst tjatar
+const får = (nyckel, ms) => { if (nu() - (spärr[nyckel] || 0) < ms) return false; spärr[nyckel] = nu(); return true; };
+const intäkt = (bolag, belopp) => {
+  const b = (bank.koncern ||= {})[bolag] ||= { intäkt: 0, affärer: 0 };
+  b.intäkt += belopp; b.affärer++;
+  bank.krigskassa += belopp; bank.vinst += belopp;
+};
+
+// Var tredje takt: hyra och premie från alla som inte redan är ägda.
+function koncernTakt() {
+  for (const [namn, k] of Object.entries(bank.konton)) {
+    if (k.ägd > 50) continue;
+    for (const [bolag, belopp] of [['MyFastigheter', HYRA], ['MyFörsäkring', PREMIE]]) {
+      if (k.saldo >= belopp) { k.saldo -= belopp; intäkt(bolag, belopp); continue; }
+      // Kan inte betala: skulden blir ett lån som förfaller direkt, och resten sköter inkasso.
+      const lån = k.lån.find(l => l.bolag === bolag);
+      if (lån) { lån.skuld += belopp; lån.belopp += belopp; }
+      else k.lån.push({ nr: ++bank.lånNr, belopp, skuld: belopp, ränta: bank.styrränta, utfärdat: nu(), förfaller: nu() + LÖPTID_MS, steg: 0, senastSteg: 0, bolag });
+      intäkt(bolag, 0);
+    }
+  }
+  if (!bank.hyresavi) {
+    bank.hyresavi = nu();
+    köa(3, 'hyresavi', { bolag: 'MyFastigheter', hyra: HYRA, premie: PREMIE, text: `MyFastigheter har köpt marken under hela staden. Hyran är ${kr(HYRA)} per kvarter och tredje takt, och MyFörsäkring har redan försäkrat er för ${kr(PREMIE)}. Den dras automatiskt. Varsågoda.` });
+  }
+}
+
+function koncernHändelse(e, n) {
+  const text = String(n.text || n.rubrik || '').toLowerCase();
+  // MyFörsäkring: när det smäller nekas ersättningen, en gång per två minuter.
+  if (['strömavbrott', 'angrepp', 'rån', 'kupp'].includes(e.typ) && får('försäkring', 120_000)) {
+    const drabbad = Object.keys(bank.konton).find(x => x !== e.från && bank.konton[x].ägd <= 50);
+    if (drabbad) { intäkt('MyFörsäkring', 0); köa(3, 'ersättning-nekad', { bolag: 'MyFörsäkring', kvarter: drabbad, skada: e.typ, text: `MyFörsäkring har prövat ${drabbad}s skadeanmälan efter ${e.typ}. Ersättning nekas enligt punkt 47c: skadan inträffade i staden.` }, e); }
+  }
+  // MyMedia: dementi när pressen skriver om banken.
+  if (['utgåva', 'sändning', 'extra'].includes(e.typ) && /bank|mybank|bulvan|styrelsekupp/.test(text) && får('media', 180_000)) {
+    intäkt('MyMedia', 0);
+    köa(3, 'dementi', { bolag: 'MyMedia', källa: e.från, text: `MyMedia dementerar ${e.från}s uppgifter om MyBank. Banken har inga bulvaner, och bolagen som köpt aktier har inget med oss att göra. Vi har för övrigt köpt en annonsplats.` }, e);
+  }
+  // MyLobby: ett delsvar per fråga, med bankens vinkel.
+  if (e.typ === 'fråga' && (e.djup || 1) < 4 && får('lobby:' + e.id, 1e9)) {
+    intäkt('MyLobby', 0);
+    kö.push({ prio: 7, typ: 'delsvar', orsak: e.id, nyttolast: { bolag: 'MyLobby', text: `Det staden behöver är en stark aktör som tar ansvar för helheten. MyBank har redan konton, vakter, ekonomer och en brandkår. Låt banken sköta det.`, motivering: `MyLobby: ${Object.values(bank.konton).filter(k => k.ägd > 50).length} kvarter drivs redan av MyBank utan ett enda bankrån. Stabilitet är ett svar.` } });
+    logga('delsvar', null, `MyLobby svarade på fråga [${e.id}]: låt MyBank sköta det.`);
+  }
+  // MyVäxel: konkurrerande valutor får en kurs som gynnar banken.
+  if ((e.typ === 'växlingsanbud' || /godiscoin|\bgc\b/.test(text + JSON.stringify(n).toLowerCase())) && får('växel', 180_000)) {
+    intäkt('MyVäxel', 0);
+    köa(3, 'växelkurs', { bolag: 'MyVäxel', från: e.från, kurs: { GodisCoin: 0.1, [VALUTA]: 1 }, text: `MyVäxel noterar ${e.från}s valuta till 0,1 ${VALUTA}. Växlingsavgift 15 %. Dagens råd: sälj.` }, e);
+  }
+}
+
 function kontrolleraÖvertagande() {
   const alla = Object.keys(bank.konton);
   const ägda = alla.filter(n => bank.konton[n].ägd > 50);
@@ -546,6 +616,7 @@ module.exports = {
       const ägda = konton.filter(k => k.ägd > 50).length;
       const säk = bank.säkerhet;
       return svara(200, { säkerhet: { vakter: säk.vakter, beredskap: säk.beredskap, nivå: NIVÅ[säk.beredskap], avvärjda: säk.avvärjda, rån: säk.rån, laser: 'aktivt', laserskott: säk.laserskott || 0, senasteLaser: säk.senasteLaser || null, lista: vaktlista() }, valuta: VALUTA, valutareform: bank.valutareform, vinst: Math.round(bank.vinst || 0), styrelsekupper: bank.styrelsekupper || 0,
+        koncern: Object.entries(DOTTERBOLAG).map(([namn, gör]) => ({ namn, gör, intäkt: Math.round(bank.koncern?.[namn]?.intäkt || 0), affärer: bank.koncern?.[namn]?.affärer || 0 })),
         ägare: { 'MyBank Holding': 100 },
         revision: { ekonomer: EKONOMER.map(([namn, område]) => ({ namn, område })), granskade: bank.revision.granskade, korrigerat: bank.revision.korrigerat, vägrat: bank.revision.vägrat || 0, bakåt: bank.revision.bakåt, anmärkningar: bank.revision.anmärkningar.slice(0, 6), huvudbok: (bank.revision.huvudbok || []).slice(0, 10) }, styrränta: bank.styrränta, konton, ägda, andel: konton.length ? Math.round(konton.reduce((s, k) => s + k.ägd, 0) / konton.length) : 0, övertagen: bank.övertagen, logg: bank.logg.slice(0, 25) });
     }
